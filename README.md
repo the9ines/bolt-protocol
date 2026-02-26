@@ -26,6 +26,10 @@ None. This is the root specification.
 - [localbolt-app](https://github.com/the9ines/localbolt-app) — Open-source native app
 - [localbolt-v3](https://github.com/the9ines/localbolt-v3) — Web application
 
+## Conformance
+
+- [docs/CONFORMANCE.md](docs/CONFORMANCE.md) — Spec-to-implementation conformance matrix.
+
 ## Status
 
 | Document | Version | Status |
