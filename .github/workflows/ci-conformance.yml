@@ -1,0 +1,53 @@
+name: Conformance Guard
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "PROTOCOL.md"
+      - "LOCALBOLT_PROFILE.md"
+      - "docs/CONFORMANCE.md"
+
+jobs:
+  conformance-check:
+    name: Require conformance update on spec changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check conformance discipline
+        run: |
+          # Get files changed in this PR relative to the merge base
+          MERGE_BASE=$(git merge-base origin/main HEAD)
+          CHANGED_FILES=$(git diff --name-only "$MERGE_BASE" HEAD)
+
+          SPEC_CHANGED=false
+          CONFORMANCE_CHANGED=false
+
+          for file in $CHANGED_FILES; do
+            case "$file" in
+              PROTOCOL.md|LOCALBOLT_PROFILE.md)
+                SPEC_CHANGED=true
+                echo "Spec file changed: $file"
+                ;;
+              docs/CONFORMANCE.md)
+                CONFORMANCE_CHANGED=true
+                echo "Conformance matrix updated: $file"
+                ;;
+            esac
+          done
+
+          if [ "$SPEC_CHANGED" = true ] && [ "$CONFORMANCE_CHANGED" = false ]; then
+            echo ""
+            echo "::error::Spec changed without updating docs/CONFORMANCE.md (CONFORMANCE-1R)."
+            echo ""
+            echo "Any change to PROTOCOL.md or LOCALBOLT_PROFILE.md must include"
+            echo "a corresponding update to docs/CONFORMANCE.md."
+            exit 1
+          fi
+
+          echo "Conformance check passed."
