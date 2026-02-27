@@ -10,7 +10,7 @@ on:
 
 jobs:
   conformance-check:
-    name: Require conformance update on spec changes
+    name: Conformance discipline and coverage
     runs-on: ubuntu-latest
 
     steps:
@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check conformance discipline
+      - name: Check conformance discipline (CONFORMANCE-1R)
         run: |
           # Get files changed in this PR relative to the merge base
           MERGE_BASE=$(git merge-base origin/main HEAD)
@@ -50,4 +50,58 @@ jobs:
             exit 1
           fi
 
-          echo "Conformance check passed."
+          echo "CONFORMANCE-1R discipline check passed."
+
+      - name: Validate conformance coverage (CONFORMANCE-2R)
+        run: |
+          FILE="docs/CONFORMANCE.md"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::docs/CONFORMANCE.md not found."
+            exit 1
+          fi
+
+          # Count PROTOCOL rows meeting coverage:
+          # - Data rows start with "| §" or "| Appendix"
+          # - Status (awk field 6) is not TODO and not NOT APPLICABLE
+          # - Evidence (awk field 7) contains at least one backtick-wrapped path
+          PROTO_COVERED=$(awk '/^## PROTOCOL\.md Conformance/,/^---/' "$FILE" | \
+            grep -E '^\| §|^\| Appendix' | \
+            awk -F '|' '{
+              status = $6; evidence = $7
+              gsub(/^[ \t]+|[ \t]+$/, "", status)
+              if (status != "TODO" && status != "NOT APPLICABLE" && evidence ~ /`/) print
+            }' | wc -l | tr -d ' ')
+
+          # Count PROFILE rows meeting coverage:
+          # - Data rows start with "| §"
+          PROFILE_COVERED=$(awk '/^## LOCALBOLT_PROFILE\.md Conformance/,/^---/' "$FILE" | \
+            grep -E '^\| §' | \
+            awk -F '|' '{
+              status = $6; evidence = $7
+              gsub(/^[ \t]+|[ \t]+$/, "", status)
+              if (status != "TODO" && status != "NOT APPLICABLE" && evidence ~ /`/) print
+            }' | wc -l | tr -d ' ')
+
+          echo "Protocol rows with evidence: $PROTO_COVERED (minimum: 10)"
+          echo "Profile rows with evidence: $PROFILE_COVERED (minimum: 5)"
+
+          FAILED=false
+
+          if [ "$PROTO_COVERED" -lt 10 ]; then
+            FAILED=true
+          fi
+
+          if [ "$PROFILE_COVERED" -lt 5 ]; then
+            FAILED=true
+          fi
+
+          if [ "$FAILED" = true ]; then
+            echo ""
+            echo "::error::CONFORMANCE-2R coverage requirement not met."
+            echo "Protocol rows with evidence: $PROTO_COVERED (minimum 10 required)"
+            echo "Profile rows with evidence: $PROFILE_COVERED (minimum 5 required)"
+            exit 1
+          fi
+
+          echo "CONFORMANCE-2R coverage check passed."
