@@ -538,21 +538,50 @@ IDLE -> OFFERED -> ACCEPTED -> TRANSFERRING <-> PAUSED -> COMPLETED
 
 ## 10. Error Taxonomy
 
-Protocol error codes (sent inside encrypted envelopes):
+This section is the **single canonical wire error code registry** for
+Bolt v1. Every error frame sent on the wire MUST use a code from this
+registry. Implementations MUST reject inbound error frames carrying
+codes not listed here (→ `PROTOCOL_VIOLATION` + disconnect).
 
-| Code | Description |
-|------|-------------|
-| `VERSION_MISMATCH` | No common protocol version |
-| `ENCRYPTION_FAILED` | Decryption or MAC verification failed |
-| `INTEGRITY_FAILED` | File hash mismatch after reassembly |
-| `REPLAY_DETECTED` | Duplicate chunk index received |
-| `TRANSFER_FAILED` | Chunk reassembly, I/O, or storage error |
-| `LIMIT_EXCEEDED` | File size, chunk count, or concurrent transfer limit exceeded |
-| `CONNECTION_LOST` | Transport disconnected during transfer |
-| `PEER_NOT_FOUND` | Rendezvous target does not exist |
-| `ALREADY_CONNECTED` | Peer is busy with another connection |
-| `INVALID_STATE` | Message received in wrong state (e.g. before handshake) |
-| `KEY_MISMATCH` | Remote identity key does not match pinned key |
+> **Registry authority (PROTO-HARDEN-1R1):** This table unifies the
+> original §10 protocol-level codes with the enforcement codes formerly
+> maintained in `PROTOCOL_ENFORCEMENT.md` Appendix A. Appendix A is now
+> non-normative — this table is the sole authority.
+
+Codes are classified into two tiers:
+
+- **PROTOCOL** — defined in this specification. Apply to all transports.
+- **ENFORCEMENT** — defined for handshake and envelope enforcement.
+  Apply to transport implementations.
+
+Three codes (`KEY_MISMATCH`, `INVALID_STATE`, `LIMIT_EXCEEDED`) appeared
+in both the original §10 and Appendix A. They are classified PROTOCOL
+(higher authority).
+
+| Code | Class | When | Framing | Semantics |
+|------|-------|------|---------|-----------|
+| `VERSION_MISMATCH` | PROTOCOL | during-hello | plaintext | No common protocol version between peers. |
+| `ENCRYPTION_FAILED` | PROTOCOL | post-handshake | envelope | Decryption or MAC verification failed on received payload. |
+| `INTEGRITY_FAILED` | PROTOCOL | post-handshake | envelope | File hash mismatch after reassembly (requires `bolt.file-hash`). |
+| `REPLAY_DETECTED` | PROTOCOL | post-handshake | envelope | Duplicate chunk index received for an active transfer. |
+| `TRANSFER_FAILED` | PROTOCOL | post-handshake | envelope | Chunk reassembly, I/O, or storage error during transfer. |
+| `LIMIT_EXCEEDED` | PROTOCOL | post-handshake | envelope | File size, chunk count, rate, or concurrency limit exceeded. |
+| `CONNECTION_LOST` | PROTOCOL | any | n/a (local) | Transport disconnected during transfer. Locally observed, not sent on wire. |
+| `PEER_NOT_FOUND` | PROTOCOL | pre-hello | plaintext | Rendezvous target does not exist. |
+| `ALREADY_CONNECTED` | PROTOCOL | pre-hello | plaintext | Peer is busy with another connection. |
+| `INVALID_STATE` | PROTOCOL | any | context-dependent | Message received in wrong session state. Plaintext before keys; envelope after. |
+| `KEY_MISMATCH` | PROTOCOL | during-hello | plaintext | Remote identity key does not match pinned key (TOFU violation). |
+| `DUPLICATE_HELLO` | ENFORCEMENT | during-hello | plaintext | Second HELLO received after key exchange complete. |
+| `HELLO_PARSE_ERROR` | ENFORCEMENT | during-hello | plaintext | HELLO outer frame is unparseable. |
+| `HELLO_DECRYPT_FAIL` | ENFORCEMENT | during-hello | plaintext | HELLO sealed payload fails decryption. |
+| `HELLO_SCHEMA_ERROR` | ENFORCEMENT | during-hello | plaintext | HELLO inner payload missing required fields or has wrong types. |
+| `ENVELOPE_REQUIRED` | ENFORCEMENT | post-handshake | plaintext (terminal) | Plaintext frame received in an envelope-required session. Sent as plaintext terminal error + disconnect. |
+| `ENVELOPE_UNNEGOTIATED` | ENFORCEMENT | post-handshake | plaintext (terminal) | Envelope-wrapped frame received when `bolt.envelope` was not negotiated. |
+| `ENVELOPE_DECRYPT_FAIL` | ENFORCEMENT | post-handshake | plaintext (terminal) | Sealed envelope payload fails decryption. |
+| `ENVELOPE_INVALID` | ENFORCEMENT | post-handshake | plaintext (terminal) | Decrypted envelope payload fails parse or schema validation. |
+| `INVALID_MESSAGE` | ENFORCEMENT | post-handshake | envelope | Inner message (post-envelope decrypt) fails parse. |
+| `UNKNOWN_MESSAGE_TYPE` | ENFORCEMENT | post-handshake | envelope | Inner message parses but contains an unrecognized type field. |
+| `PROTOCOL_VIOLATION` | ENFORCEMENT | any | context-dependent | Catch-all for violations not covered by a specific code. Plaintext before keys; envelope after. |
 
 `KEY_MISMATCH` details SHOULD include:
 
@@ -565,6 +594,14 @@ Error code separation:
 - `TRANSFER_FAILED`: I/O, reassembly, storage errors
 - `INTEGRITY_FAILED`: file hash mismatch only (when `bolt.file-hash` used)
 - `ENCRYPTION_FAILED`: decrypt or MAC failure only
+
+Framing rules:
+
+- **plaintext**: sent before shared keys are established (pre-hello and during-hello phases).
+- **envelope**: MUST be sent inside an encrypted envelope after handshake completion.
+- **plaintext (terminal)**: sent as a plaintext terminal error immediately before disconnect, even in envelope-required mode (best-effort delivery per §15.4).
+- **context-dependent**: plaintext before keys exist; envelope after handshake.
+- **n/a (local)**: locally observed condition, not transmitted on the wire.
 
 Implementations MAY wrap these in language-specific error types.
 
@@ -724,20 +761,19 @@ or re-derivation is permitted.
 
 ### 15.3 Error Registry Invariants
 
-Bolt v1 defines a single canonical error code registry. The authoritative
-list is in §10 of this document (11 protocol-level codes). The enforcement
-posture document (`PROTOCOL_ENFORCEMENT.md`) defines additional
-transport-level codes (Appendix A, 14 codes total) that are supersets
-of the protocol codes.
+Bolt v1 defines a single canonical wire error code registry in §10 of
+this document. As of PROTO-HARDEN-1R1, §10 contains 22 codes (11
+PROTOCOL-class, 11 ENFORCEMENT-class), unifying the original §10 codes
+with the enforcement codes formerly in `PROTOCOL_ENFORCEMENT.md`
+Appendix A. Appendix A is now non-normative.
 
 **Invariant (PROTO-HARDEN-03):** All implementations MUST emit error codes
-from the §10 registry for protocol-level violations. Implementations MUST NOT
-invent new protocol-level error codes without a spec amendment.
+from the §10 registry. Implementations MUST NOT invent new error codes
+without a spec amendment.
 
-**Invariant (PROTO-HARDEN-04):** The §10 registry and the
-PROTOCOL_ENFORCEMENT.md Appendix A registry MUST NOT contradict each other.
-If a code appears in both, the semantics MUST be identical. Appendix A may
-define additional transport-level codes that are not in §10.
+**Invariant (PROTO-HARDEN-04):** `PROTOCOL_ENFORCEMENT.md` MUST NOT
+define error codes independently. Any error code reference in that
+document MUST defer to §10 as the sole authority.
 
 **Invariant (PROTO-HARDEN-05):** Rust and TypeScript implementations MUST
 emit the same error code string for the same violation condition. Error
