@@ -647,6 +647,155 @@ Implementations MAY wrap these in language-specific error types.
 
 ---
 
+## 15. Handshake Invariants — Authoritative
+
+> **Phase:** PROTO-HARDEN-1
+> **Status:** Normative
+> **Date:** 2026-02-26
+
+This section formalizes handshake security properties that were previously
+implicit across §3, §6, and §10. These invariants are authoritative and
+MUST be enforced by all implementations.
+
+### 15.1 Canonical Keying Model: Ephemeral-First
+
+Bolt v1 uses an **ephemeral-first** keying model:
+
+1. Each peer generates a fresh ephemeral X25519 keypair before sending any
+   protected message.
+2. The first protected message is an encrypted HELLO envelope. The envelope
+   header carries `sender_ephemeral_key` in cleartext.
+3. The HELLO payload (encrypted under ephemeral keys) carries the persistent
+   `identity_key`.
+4. The receiver decrypts the HELLO using the sender's ephemeral public key
+   (from the envelope header) and its own ephemeral secret key.
+5. The receiver extracts `identity_key` from the decrypted HELLO and performs
+   TOFU verification.
+
+This means:
+
+- Ephemeral keys are established first (envelope header, cleartext).
+- Identity keys are delivered second (HELLO payload, encrypted).
+- No protected message may be sent or accepted before the ephemeral keypair
+  exists.
+- Identity keys are NEVER transmitted in cleartext.
+
+Implementations MUST NOT use an identity-first model where the identity key
+is exchanged before the ephemeral key is available.
+
+### 15.2 Cryptographic Binding: Identity to Ephemeral
+
+The identity key and ephemeral key MUST be cryptographically bound within
+each session. Bolt v1 achieves this binding through two mechanisms:
+
+**Mechanism 1 — Envelope authentication:**
+
+The `identity_key` is transmitted inside a HELLO message encrypted with
+the ephemeral keypair via NaCl box. The Poly1305 MAC on the envelope
+authenticates the `identity_key` value under the ephemeral shared secret.
+An attacker cannot substitute a different `identity_key` without breaking
+the MAC.
+
+**Mechanism 2 — SAS computation:**
+
+SAS binds both key types:
+
+```
+SAS_input = SHA-256(
+  sort32(identity_A, identity_B) ||
+  sort32(ephemeral_A, ephemeral_B)
+)
+```
+
+If an active MITM substitutes ephemeral keys, the SAS will differ between
+peers (assuming honest identity keys). If identity keys are substituted,
+the SAS will also differ (assuming honest ephemeral keys). SAS verification
+detects any substitution of either key type.
+
+**Invariant (PROTO-HARDEN-01):** An implementation MUST NOT accept an
+`identity_key` that was not delivered inside an envelope authenticated
+by the session's ephemeral keypair.
+
+**Invariant (PROTO-HARDEN-02):** An implementation MUST compute SAS over
+the exact `identity_key` values received in the decrypted HELLO messages
+and the exact `sender_ephemeral_key` values from the envelope headers that
+carried those HELLO messages. No substitution, caching from prior sessions,
+or re-derivation is permitted.
+
+### 15.3 Error Registry Invariants
+
+Bolt v1 defines a single canonical error code registry. The authoritative
+list is in §10 of this document (11 protocol-level codes). The enforcement
+posture document (`PROTOCOL_ENFORCEMENT.md`) defines additional
+transport-level codes (Appendix A, 14 codes total) that are supersets
+of the protocol codes.
+
+**Invariant (PROTO-HARDEN-03):** All implementations MUST emit error codes
+from the §10 registry for protocol-level violations. Implementations MUST NOT
+invent new protocol-level error codes without a spec amendment.
+
+**Invariant (PROTO-HARDEN-04):** The §10 registry and the
+PROTOCOL_ENFORCEMENT.md Appendix A registry MUST NOT contradict each other.
+If a code appears in both, the semantics MUST be identical. Appendix A may
+define additional transport-level codes that are not in §10.
+
+**Invariant (PROTO-HARDEN-05):** Rust and TypeScript implementations MUST
+emit the same error code string for the same violation condition. Error
+code parity is a conformance requirement.
+
+### 15.4 Post-Handshake Envelope Requirement
+
+After handshake completion (mutual HELLO exchange + TOFU verification),
+the envelope requirement is determined by capability negotiation:
+
+- If `bolt.profile-envelope-v1` was negotiated: all post-handshake messages
+  MUST be enveloped. No plaintext messages are permitted except PING/PONG.
+- If envelope capability was NOT negotiated: legacy plaintext mode applies
+  (see PROTOCOL_ENFORCEMENT.md §5).
+
+**Invariant (PROTO-HARDEN-06):** In envelope-required mode, ERROR messages
+MUST be transmitted inside an encrypted envelope. The sole exception is
+error frames sent as the final message immediately before transport
+disconnect, which MAY be plaintext (best-effort delivery per
+PROTOCOL_ENFORCEMENT.md §6).
+
+**Invariant (PROTO-HARDEN-07):** An implementation MUST NOT send plaintext
+ERROR messages during normal operation in envelope-required mode. The
+plaintext error exception applies ONLY to terminal disconnect frames.
+
+### 15.5 HELLO State Machine Guarantees
+
+The HELLO exchange follows a strict state machine with no reentrancy:
+
+```
+AWAITING_HELLO -> HELLO_SENT -> HELLO_RECEIVED -> HANDSHAKE_COMPLETE
+```
+
+**Invariant (PROTO-HARDEN-08):** The transition from `AWAITING_HELLO` to
+`HELLO_SENT` MUST be atomic. Once a HELLO is sent, the implementation MUST
+NOT send another HELLO on the same session, regardless of whether a response
+has been received.
+
+**Invariant (PROTO-HARDEN-09):** The transition to `HANDSHAKE_COMPLETE` MUST
+occur exactly once per session. No state machine path may revisit
+`AWAITING_HELLO` or `HELLO_SENT` after reaching `HANDSHAKE_COMPLETE`.
+
+**Invariant (PROTO-HARDEN-10):** Receiving a HELLO when the local state is
+already `HANDSHAKE_COMPLETE` MUST trigger `DUPLICATE_HELLO` error and
+immediate disconnect. There is no "re-handshake" path.
+
+**Invariant (PROTO-HARDEN-11):** The HELLO state machine MUST NOT have a
+reentrancy window. Specifically: if a peer is processing an inbound HELLO
+(decrypting, parsing, verifying TOFU), it MUST NOT accept or process a
+second inbound HELLO concurrently. Implementations MUST serialize HELLO
+processing.
+
+**Invariant (PROTO-HARDEN-12):** Capability negotiation results (including
+envelope-required mode) MUST be immutable after `HANDSHAKE_COMPLETE`. No
+subsequent message may alter the negotiated capability set.
+
+---
+
 ## Appendix A: Profile System
 
 - Bolt Core is transport-agnostic

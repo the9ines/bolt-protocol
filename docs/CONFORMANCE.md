@@ -40,7 +40,7 @@ validates minimum coverage requirements.
 
 | Spec | Total Rows | Minimum with Evidence (N) |
 |------|-----------|--------------------------|
-| PROTOCOL.md | 17 | 10 |
+| PROTOCOL.md | 23 | 10 |
 | LOCALBOLT_PROFILE.md | 14 | 5 |
 
 A row **meets coverage** when:
@@ -83,6 +83,12 @@ A CI guard validates:
 | §12 Threat Model | Rendezvous untrusted, MITM detection, traffic analysis non-goal | N/A (informational) | N/A | NOT APPLICABLE | |
 | §13 Conformance | MUST/SHOULD/MAY requirements list | Test suites: S1 conformance harness (Rust), H2 enforcement tests (TS) | H3 golden vectors, H5 downgrade validation | PARTIAL | `bolt-core-sdk/rust/bolt-core/tests/conformance/main.rs`, `bolt-daemon/tests/h3_golden_vectors.rs` |
 | §14 Constants | Protocol constants table | TS: `bolt-core/src/constants.ts`; Rust: `src/constants.rs` | N/A (uses bolt-core crate) | IMPLEMENTED | `bolt-core-sdk/ts/bolt-core/__tests__/exports.test.ts`, `bolt-core-sdk/scripts/verify-constants.sh` |
+| §15 Handshake Invariants | Keying model, key binding, error registry, envelope requirement, HELLO state machine | See §15 subsection rows below | See §15 subsection rows below | See below | |
+| §15.1 Ephemeral-first keying | Canonical HELLO keying model (PROTO-HARDEN-01, 02) | TS: `bolt-transport-web/src/services/webrtc/WebRTCService.ts` (HELLO send/receive); Rust: `src/crypto.rs` | `src/web_hello.rs` (HELLO exchange) | TODO | |
+| §15.2 Identity-ephemeral binding | Cryptographic binding via envelope MAC + SAS (PROTO-HARDEN-01, 02) | TS: `bolt-core/src/sas.ts`, `bolt-core/src/crypto.ts`; Rust: `src/sas.rs`, `src/crypto.rs` | `src/web_hello.rs`, `src/session.rs` | TODO | |
+| §15.3 Error registry invariants | Single canonical registry, cross-impl parity (PROTO-HARDEN-03, 04, 05) | TS: `bolt-core/src/errors.ts`; Rust: `src/errors.rs` | `src/envelope.rs` (EnvelopeError, CANONICAL_ERROR_CODES) | TODO | |
+| §15.4 Post-handshake envelope | No plaintext errors in envelope-required mode (PROTO-HARDEN-06, 07) | TS: `bolt-transport-web/src/services/webrtc/WebRTCService.ts` (envelope mode) | `src/envelope.rs` (build_error_payload) | TODO | |
+| §15.5 HELLO state machine | No reentrancy, exactly-once, immutable capabilities (PROTO-HARDEN-08–12) | TS: `bolt-transport-web/src/services/webrtc/WebRTCService.ts` (helloComplete guard) | `src/web_hello.rs` (HelloState) | TODO | |
 | Appendix A | Profile system | N/A (informational) | N/A | NOT APPLICABLE | |
 | Appendix B | Key rotation (out of scope for v1) | N/A | N/A | NOT APPLICABLE | |
 | Appendix C | Conformance tests | S1 harness (`rust/bolt-core/tests/conformance/`), H2 tests, H3 vectors | H3 golden vectors, H5 downgrade tests | PARTIAL | `bolt-core-sdk/rust/bolt-core/tests/conformance/main.rs`, `bolt-daemon/tests/h5_downgrade_validation.rs` |
