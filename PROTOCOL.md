@@ -576,7 +576,7 @@ in both the original §10 and Appendix A. They are classified PROTOCOL
 | `HELLO_DECRYPT_FAIL` | ENFORCEMENT | during-hello | plaintext | HELLO sealed payload fails decryption. |
 | `HELLO_SCHEMA_ERROR` | ENFORCEMENT | during-hello | plaintext | HELLO inner payload missing required fields or has wrong types. |
 | `ENVELOPE_REQUIRED` | ENFORCEMENT | post-handshake | plaintext (terminal) | Plaintext frame received in an envelope-required session. Sent as plaintext terminal error + disconnect. |
-| `ENVELOPE_UNNEGOTIATED` | ENFORCEMENT | post-handshake | plaintext (terminal) | Envelope-wrapped frame received when `bolt.envelope` was not negotiated. |
+| `ENVELOPE_UNNEGOTIATED` | ENFORCEMENT | post-handshake | plaintext (terminal) | Envelope-wrapped frame received when `bolt.profile-envelope-v1` was not negotiated. |
 | `ENVELOPE_DECRYPT_FAIL` | ENFORCEMENT | post-handshake | plaintext (terminal) | Sealed envelope payload fails decryption. |
 | `ENVELOPE_INVALID` | ENFORCEMENT | post-handshake | plaintext (terminal) | Decrypted envelope payload fails parse or schema validation. |
 | `INVALID_MESSAGE` | ENFORCEMENT | post-handshake | envelope | Inner message (post-envelope decrypt) fails parse. |
