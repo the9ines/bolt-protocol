@@ -239,6 +239,59 @@ Computation:
 - Encoding MUST be negotiated before transfer begins
 - Capabilities are strings. Reserved namespace: `bolt.*`. Unknown capabilities ignored.
 
+### Registered Capabilities
+
+| Capability String | Specification | Description |
+|-------------------|---------------|-------------|
+| `bolt.file-hash` | §8 File Integrity Verification | SHA-256 file hash verification after reassembly |
+| `bolt.profile-envelope-v1` | LocalBolt Profile §14 | Profile-level envelope wrapping |
+| `bolt.transfer-ratchet-v1` | §16 Bolt Transfer Ratchet (BTR) | Per-transfer key isolation and per-chunk forward secrecy |
+
+### `bolt.transfer-ratchet-v1` Capability Negotiation (Normative)
+
+The `bolt.transfer-ratchet-v1` capability enables the Bolt Transfer Ratchet (BTR)
+for per-chunk forward secrecy and per-transfer key isolation. Negotiation follows
+the standard HELLO capability intersection model.
+
+#### Negotiation Matrix
+
+| Local Support | Remote Support | Result | Security Level | Behavior |
+|---------------|----------------|--------|----------------|----------|
+| YES | YES | **Full BTR** — per-transfer DH ratchet + per-chunk symmetric chain | Per-chunk FS, transfer isolation, self-healing | Normal operation |
+| YES | NO | **Downgrade** — static ephemeral (v1 behavior) | Session-level FS only | Log `[BTR_DOWNGRADE]`, warn user |
+| NO | YES | **Downgrade** — static ephemeral (v1 behavior) | Session-level FS only | Log `[BTR_DOWNGRADE]`, warn user |
+| NO | NO | **Static ephemeral** — current v1 behavior | Session-level FS only | Normal operation |
+| YES | MALFORMED | **Reject** — peer advertises `bolt.transfer-ratchet-v1` but sends invalid BTR metadata | N/A | `RATCHET_DOWNGRADE_REJECTED` + disconnect |
+| MALFORMED | YES | **Reject** — peer advertises `bolt.transfer-ratchet-v1` but sends invalid BTR metadata | N/A | `RATCHET_DOWNGRADE_REJECTED` + disconnect |
+
+**Downgrade-with-warning** is the default compatibility mode for one-sided support.
+Implementations MUST:
+
+- Log `[BTR_DOWNGRADE]` when downgrade occurs (with local and remote capability lists).
+- Surface a user-visible warning indicating reduced security when feasible.
+- Continue the session using static ephemeral encryption (v1 behavior).
+- MUST NOT refuse the connection solely due to missing BTR support.
+
+**Malformed BTR metadata** (rows 5–6) applies when a peer advertises
+`bolt.transfer-ratchet-v1` in HELLO capabilities but subsequently:
+
+- Sends envelopes missing required BTR fields (§16.2) during a BTR-negotiated transfer.
+- Sends BTR fields with invalid types, sizes, or values.
+- Claims BTR capability but uses static ephemeral keys for transfer messages.
+
+This is a protocol violation (misadvertised capability), not a normal capability
+mismatch. Implementations MUST send `RATCHET_DOWNGRADE_REJECTED` and disconnect.
+
+#### SAS Computation — Unchanged
+
+BTR does NOT alter SAS computation. SAS inputs remain:
+
+- `identity_A`, `identity_B` — raw identity public keys from HELLO
+- `ephemeral_A`, `ephemeral_B` — raw ephemeral public keys from HELLO envelope headers
+
+Ratchet-derived keys are NOT SAS inputs. SAS verifies the initial handshake;
+BTR extends key material derivation post-handshake.
+
 ### HELLO Schema
 
 | Field | Type | Required | Description |
@@ -325,7 +378,10 @@ All protected messages are carried inside an encrypted envelope.
 |-------|------|----------|-------------|
 | `sender_ephemeral_key` | bytes32 | required | Sender's ephemeral X25519 public key |
 | `nonce` | bytes24 | required | Cryptographically random nonce |
-| `ciphertext` | bytes | required | NaCl box output |
+| `ciphertext` | bytes | required | NaCl box output (keyed by ephemeral shared secret or BTR message key — see §16.2) |
+| `ratchet_public_key` | bytes32 | conditional | Current DH ratchet public key. Present IFF `bolt.transfer-ratchet-v1` negotiated AND a DH ratchet step occurs (transfer boundary). See §16.2. |
+| `ratchet_generation` | uint32 | conditional | DH ratchet epoch counter. Present IFF `ratchet_public_key` is present. Monotonically increasing per session. See §16.2. |
+| `chain_index` | uint32 | conditional | Symmetric chain position (= chunk index within current transfer). Present on every envelope in a BTR-negotiated transfer. See §16.2. |
 
 ```
 ciphertext = NaCl box(
@@ -351,9 +407,27 @@ Implementations MUST:
 - generate a fresh ephemeral keypair per connection
 - discard ephemeral keys after session termination
 
+#### BTR Envelope Field Rules
+
+When `bolt.transfer-ratchet-v1` is negotiated:
+
+- `ratchet_public_key` and `ratchet_generation` MUST be present on the first
+  envelope of each transfer (FILE_OFFER) and whenever a DH ratchet step occurs.
+- `chain_index` MUST be present on every FILE_CHUNK envelope.
+- `chain_index` MUST equal the chunk_index for that transfer (0-based).
+- Receiving a BTR field in a non-BTR session (capability not negotiated) is a
+  protocol violation: `PROTOCOL_VIOLATION` + disconnect.
+- Receiving a transfer envelope without required BTR fields in a BTR session
+  (capability negotiated) is a protocol violation: `RATCHET_STATE_ERROR` + disconnect.
+- Unknown BTR fields MUST be ignored (forward compatibility with future ratchet versions).
+
+**Overhead estimate:** +36 bytes on DH-step envelopes (32B public key + 4B generation),
++4 bytes on every FILE_CHUNK envelope (chain_index). Negligible relative to typical
+16KB chunk payloads.
+
 #### Decryption Rules
 
-- Receiver uses `sender_ephemeral_key` from the envelope and its own ephemeral secret key
+- Receiver uses `sender_ephemeral_key` from the envelope and its own ephemeral secret key (non-BTR), or the BTR-derived message key (BTR sessions — see §16)
 - Receiver MUST verify MAC before processing message contents
 
 #### Decrypt Failure Handling
@@ -488,6 +562,9 @@ When `bolt.file-hash` is not negotiated:
 - Replay detection is scoped per `(transfer_id, chunk_index)`
 - Receiver MUST reject duplicate `chunk_index` for the same `transfer_id`
 - Receiver MUST reject `chunk_index >= total_chunks`
+- When `bolt.transfer-ratchet-v1` is negotiated, replay detection is further
+  strengthened by `ratchet_generation`: envelopes with a stale generation MUST
+  be rejected. See §11 REPLAY-BTR and §16.
 
 ### Resource Limits
 
@@ -548,11 +625,13 @@ codes not listed here (→ `PROTOCOL_VIOLATION` + disconnect).
 > maintained in `PROTOCOL_ENFORCEMENT.md` Appendix A. Appendix A is now
 > non-normative — this table is the sole authority.
 
-Codes are classified into two tiers:
+Codes are classified into three tiers:
 
 - **PROTOCOL** — defined in this specification. Apply to all transports.
 - **ENFORCEMENT** — defined for handshake and envelope enforcement.
   Apply to transport implementations.
+- **BTR** — defined for Bolt Transfer Ratchet (§16). Apply only when
+  `bolt.transfer-ratchet-v1` is negotiated.
 
 Three codes (`KEY_MISMATCH`, `INVALID_STATE`, `LIMIT_EXCEEDED`) appeared
 in both the original §10 and Appendix A. They are classified PROTOCOL
@@ -582,6 +661,10 @@ in both the original §10 and Appendix A. They are classified PROTOCOL
 | `INVALID_MESSAGE` | ENFORCEMENT | post-handshake | envelope | Inner message (post-envelope decrypt) fails parse. |
 | `UNKNOWN_MESSAGE_TYPE` | ENFORCEMENT | post-handshake | envelope | Inner message parses but contains an unrecognized type field. |
 | `PROTOCOL_VIOLATION` | ENFORCEMENT | any | context-dependent | Catch-all for violations not covered by a specific code. Plaintext before keys; envelope after. |
+| `RATCHET_STATE_ERROR` | BTR | post-handshake | envelope | BTR state desynchronization: ratchet generation mismatch, unexpected DH ratchet key, or missing required BTR fields in a BTR-negotiated session. Terminal: disconnect. |
+| `RATCHET_CHAIN_ERROR` | BTR | post-handshake | envelope | Symmetric chain index mismatch or gap within a BTR-negotiated transfer. Terminal: cancel transfer. |
+| `RATCHET_DECRYPT_FAIL` | BTR | post-handshake | envelope | Decryption using BTR-derived message key failed. Distinct from `ENCRYPTION_FAILED` (static ephemeral). Terminal: cancel transfer. |
+| `RATCHET_DOWNGRADE_REJECTED` | BTR | post-handshake | envelope | Peer advertised `bolt.transfer-ratchet-v1` but sent non-BTR or malformed BTR envelopes (misadvertised capability). Terminal: disconnect. |
 
 `KEY_MISMATCH` details SHOULD include:
 
@@ -593,7 +676,11 @@ Error code separation:
 - `LIMIT_EXCEEDED`: configured resource limits only
 - `TRANSFER_FAILED`: I/O, reassembly, storage errors
 - `INTEGRITY_FAILED`: file hash mismatch only (when `bolt.file-hash` used)
-- `ENCRYPTION_FAILED`: decrypt or MAC failure only
+- `ENCRYPTION_FAILED`: decrypt or MAC failure using static ephemeral keys only
+- `RATCHET_DECRYPT_FAIL`: decrypt or MAC failure using BTR-derived message keys
+- `RATCHET_STATE_ERROR`: BTR state desynchronization (generation, DH key, missing fields)
+- `RATCHET_CHAIN_ERROR`: symmetric chain index mismatch or gap
+- `RATCHET_DOWNGRADE_REJECTED`: misadvertised BTR capability (protocol violation)
 
 Framing rules:
 
@@ -618,6 +705,45 @@ Implementations MAY wrap these in language-specific error types.
 - Forward secrecy: ephemeral keys discarded after disconnect
 - SAS verification: optional user confirmation (24-bit)
 - Transport independence: security does not depend on transport encryption
+
+### BTR Security Properties (when `bolt.transfer-ratchet-v1` negotiated)
+
+The following properties apply ONLY when BTR is active (both peers negotiated
+`bolt.transfer-ratchet-v1`). Without BTR, the static ephemeral properties above
+apply.
+
+#### REPLAY-BTR — Anti-Replay Across Reconnect/Resume
+
+- Replay detection is extended to `(transfer_id, ratchet_generation, chain_index)`.
+- `ratchet_generation` is monotonically increasing per session. A replayed envelope
+  from a prior generation MUST be rejected.
+- Reconnection creates a new session with a fresh ephemeral handshake. BTR state
+  from a prior session MUST NOT carry over (memory-only policy).
+- There is no BTR session resume in v1 (BTR-NG1).
+
+#### ISOLATION-BTR — Transfer Isolation
+
+- Each transfer derives an independent root key via HKDF bound to `transfer_id`.
+- No key derivation path exists between transfer A's keys and transfer B's keys.
+- Compromise of one transfer's key material MUST NOT enable decryption of any
+  other transfer's chunks.
+
+#### ORDER-BTR — Ordered-Chunk Assumption
+
+- Receiver MUST reject `chain_index` != `expected_next_index` (no gap tolerance).
+- There is no skipped-message-key buffer. Out-of-order delivery is a protocol
+  error: `RATCHET_CHAIN_ERROR` + cancel transfer.
+- This invariant is justified by Bolt's ordered-reliable transport requirement
+  (§1.1 Wire Model: Profiles MUST provide message boundary preservation).
+
+#### EPOCH-BTR — Bounded Compromise Window
+
+- A DH ratchet step occurs at each transfer boundary (FILE_OFFER / FILE_ACCEPT).
+- Compromise of the current ratchet state reveals at most the current transfer's
+  remaining chunks (from the compromised chain_index forward).
+- After the next DH ratchet step (next transfer), forward secrecy is restored
+  (self-healing property).
+- The compromise window is bounded by: `remaining_chunks × chunk_size` bytes.
 
 ---
 
@@ -661,6 +787,13 @@ Implementations MAY wrap these in language-specific error types.
 - SHOULD: advertise limits in HELLO
 - SHOULD: implement backpressure handling
 - MAY: support pause/resume
+- MAY: implement `bolt.transfer-ratchet-v1` (BTR)
+- If BTR implemented, MUST: derive keys per §16.3 key schedule
+- If BTR implemented, MUST: enforce BTR invariants BTR-INV-01 through BTR-INV-11
+- If BTR implemented, MUST: support downgrade-with-warning for non-BTR peers
+- If BTR implemented, MUST: zeroize all BTR state on disconnect
+- If BTR implemented, MUST: reject chain index gaps (no skipped-key buffer)
+- If BTR implemented, MUST: pass all BTR conformance vectors (Appendix C)
 
 ---
 
@@ -681,6 +814,13 @@ Implementations MAY wrap these in language-specific error types.
 | `FILE_HASH_LENGTH` | 32 bytes |
 | `BOLT_VERSION` | 1 |
 | `CAPABILITY_NAMESPACE` | `bolt.*` (reserved) |
+| `BTR_SESSION_ROOT_INFO` | `"bolt-btr-session-root-v1"` |
+| `BTR_TRANSFER_ROOT_INFO` | `"bolt-btr-transfer-root-v1"` |
+| `BTR_MESSAGE_KEY_INFO` | `"bolt-btr-message-key-v1"` |
+| `BTR_CHAIN_ADVANCE_INFO` | `"bolt-btr-chain-advance-v1"` |
+| `BTR_DH_RATCHET_INFO` | `"bolt-btr-dh-ratchet-v1"` |
+| `BTR_HKDF_HASH` | SHA-256 |
+| `BTR_KEY_LENGTH` | 32 bytes |
 
 ---
 
@@ -762,10 +902,10 @@ or re-derivation is permitted.
 ### 15.3 Error Registry Invariants
 
 Bolt v1 defines a single canonical wire error code registry in §10 of
-this document. As of PROTO-HARDEN-1R1, §10 contains 22 codes (11
-PROTOCOL-class, 11 ENFORCEMENT-class), unifying the original §10 codes
-with the enforcement codes formerly in `PROTOCOL_ENFORCEMENT.md`
-Appendix A. Appendix A is now non-normative.
+this document. As of BTR-0, §10 contains 26 codes (11 PROTOCOL-class,
+11 ENFORCEMENT-class, 4 BTR-class), extending the unified registry
+from PROTO-HARDEN-1R1. Appendix A of `PROTOCOL_ENFORCEMENT.md` remains
+non-normative.
 
 **Invariant (PROTO-HARDEN-03):** All implementations MUST emit error codes
 from the §10 registry. Implementations MUST NOT invent new error codes
@@ -832,6 +972,254 @@ subsequent message may alter the negotiated capability set.
 
 ---
 
+## 16. Bolt Transfer Ratchet (BTR) — Normative
+
+> **Phase:** BTR-0 (Spec Lock)
+> **Status:** Normative
+> **Date:** 2026-03-09
+> **Capability:** `bolt.transfer-ratchet-v1`
+> **Prerequisite:** §15 Handshake Invariants (PROTO-HARDEN)
+
+This section specifies the Bolt Transfer Ratchet, a transfer-scoped key agreement
+mechanism providing per-chunk forward secrecy and per-transfer key isolation.
+BTR is OPTIONAL — it activates only when both peers negotiate
+`bolt.transfer-ratchet-v1` via HELLO capability intersection (§4).
+
+### 16.1 Architecture Overview
+
+BTR layers on top of the v1 ephemeral handshake without replacing it:
+
+```
+Session Setup (unchanged — §3):
+  Fresh X25519 ephemeral DH → shared_secret → NaCl box for HELLO
+                                    │
+BTR Session Root (new):             │
+  HKDF-SHA256(shared_secret, "bolt-btr-session-root-v1") → session_root_key
+                                    │
+Transfer Key Derivation (new):      │
+  Per transfer: HKDF-SHA256(session_root_key, transfer_id) → transfer_root_key
+                                    │
+Chunk Symmetric Chain (new):        │
+  Per chunk: KDF(chain_key) → (next_chain_key, message_key)
+  Encrypt chunk plaintext with message_key via NaCl box
+                                    │
+Inter-Transfer DH Ratchet (new):    │
+  At transfer boundary: new X25519 DH keypair → new session_root_key
+  Self-healing: forward secrecy restored across transfer boundaries
+```
+
+### 16.2 Envelope Fields
+
+When `bolt.transfer-ratchet-v1` is negotiated, the envelope schema (§6.1) is
+extended with conditional fields:
+
+| Field | Type | When Present | Description |
+|-------|------|-------------|-------------|
+| `ratchet_public_key` | bytes32 | DH ratchet step (transfer boundary) | New DH ratchet public key |
+| `ratchet_generation` | uint32 | DH ratchet step (transfer boundary) | Monotonically increasing epoch counter |
+| `chain_index` | uint32 | Every FILE_CHUNK in BTR session | Symmetric chain position (= chunk_index) |
+
+**Presence rules:**
+
+- FILE_OFFER envelope: MUST include `ratchet_public_key` and `ratchet_generation`.
+  The sender generates a fresh X25519 keypair and performs a DH ratchet step.
+- FILE_ACCEPT envelope: MUST include `ratchet_public_key` and `ratchet_generation`.
+  The receiver generates a fresh X25519 keypair and completes the DH step.
+- FILE_CHUNK envelope: MUST include `chain_index`. MUST NOT include
+  `ratchet_public_key` or `ratchet_generation` (no mid-transfer DH steps).
+- FILE_FINISH, PAUSE, RESUME, CANCEL: MUST include `chain_index` equal to the
+  last chunk's chain_index. No DH fields.
+- Non-transfer messages (ERROR, PING, PONG): No BTR fields.
+
+### 16.3 Key Schedule
+
+#### Session Root Derivation
+
+After HELLO handshake completes (§3), both peers compute the shared secret from
+the ephemeral X25519 DH. BTR derives a session root key:
+
+```
+ephemeral_shared_secret = X25519(local_eph_sec, remote_eph_pub)
+session_root_key = HKDF-SHA256(
+  salt  = empty (zero-length),
+  ikm   = ephemeral_shared_secret,
+  info  = "bolt-btr-session-root-v1",
+  len   = 32
+)
+```
+
+#### Transfer Root Derivation
+
+For each transfer, a transfer-scoped root key is derived:
+
+```
+transfer_root_key = HKDF-SHA256(
+  salt  = transfer_id (16 bytes),
+  ikm   = current_session_root_key,
+  info  = "bolt-btr-transfer-root-v1",
+  len   = 32
+)
+```
+
+The initial `chain_key` for the transfer equals `transfer_root_key`.
+
+#### Symmetric Chain Advancement (Per-Chunk)
+
+For each chunk in a transfer, the chain advances:
+
+```
+message_key  = HKDF-SHA256(
+  salt  = empty,
+  ikm   = chain_key,
+  info  = "bolt-btr-message-key-v1",
+  len   = 32
+)
+next_chain_key = HKDF-SHA256(
+  salt  = empty,
+  ikm   = chain_key,
+  info  = "bolt-btr-chain-advance-v1",
+  len   = 32
+)
+```
+
+- `message_key` is used to encrypt/decrypt the chunk payload via NaCl box.
+- `chain_key` is replaced by `next_chain_key`. The old `chain_key` MUST be
+  zeroized immediately.
+- `message_key` MUST be zeroized after single use (encrypt or decrypt).
+
+#### Inter-Transfer DH Ratchet Step
+
+At each transfer boundary (FILE_OFFER sent/received), the initiating peer:
+
+1. Generates a fresh X25519 keypair: `(new_ratchet_pub, new_ratchet_sec)`.
+2. Computes new DH shared secret: `dh_output = X25519(new_ratchet_sec, remote_ratchet_pub)`.
+3. Derives new session root key:
+   ```
+   new_session_root_key = HKDF-SHA256(
+     salt  = current_session_root_key,
+     ikm   = dh_output,
+     info  = "bolt-btr-dh-ratchet-v1",
+     len   = 32
+   )
+   ```
+4. Increments `ratchet_generation` by 1.
+5. Includes `ratchet_public_key` and `ratchet_generation` in the envelope.
+6. Zeroizes `new_ratchet_sec` and old `session_root_key`.
+
+The responding peer (FILE_ACCEPT) performs the same steps with its own fresh keypair,
+completing the mutual DH ratchet.
+
+### 16.4 Encryption with BTR Message Keys
+
+When BTR is active, chunk encryption uses the BTR-derived `message_key` instead
+of the static ephemeral shared secret:
+
+```
+ciphertext = NaCl box(
+  plaintext_chunk_bytes,
+  nonce,               // fresh 24-byte CSPRNG per envelope (unchanged)
+  message_key          // BTR-derived, NOT the ephemeral shared secret
+)
+```
+
+Implementation note: NaCl box normally takes (plaintext, nonce, receiver_pub,
+sender_sec). With BTR, both peers derive the same `message_key` deterministically.
+Implementations MUST use a symmetric NaCl secretbox (XSalsa20-Poly1305) keyed by
+`message_key` for BTR-encrypted envelopes.
+
+The `sender_ephemeral_key` field in the envelope header remains present for
+backward compatibility and session identification, but is NOT used for BTR
+chunk decryption.
+
+### 16.5 Key Material Lifecycle
+
+#### State Objects
+
+| Object | Scope | Size | Lifetime | Cleanup Trigger |
+|--------|-------|------|----------|-----------------|
+| `session_root_key` | Per session | 32 B | Session start → disconnect | Disconnect |
+| `ratchet_keypair` | Per DH step | 64 B | Transfer boundary → next boundary | Next DH step or disconnect |
+| `transfer_root_key` | Per transfer | 32 B | FILE_OFFER → transfer end | Transfer complete, cancel, or disconnect |
+| `chain_key` | Per chain step | 32 B | Chunk N → chunk N+1 | Next chain advance (immediate) |
+| `message_key` | Single use | 32 B | Encrypt or decrypt one chunk | Immediate after use |
+| `ratchet_generation` | Per session | 4 B | Session start → disconnect | Disconnect |
+
+**Total per-session state:** ~164 bytes. No skipped-key buffer required.
+
+#### Memory-Only Policy (Normative)
+
+All BTR key material MUST be stored in memory only. Implementations:
+
+- MUST NOT persist any BTR state to disk, database, or non-volatile storage.
+- MUST NOT log key material (session root, transfer root, chain key, message key,
+  ratchet secret key) at any log level.
+- MUST zeroize all BTR state on disconnect (SEC-04, SEC-05 preserved).
+- MUST generate fresh BTR state on reconnection (no session resume in v1).
+
+This policy is locked per PM-BTR-03. Session resumption (persistent ratchet
+state across disconnects) is an explicit non-goal for BTR v1 (BTR-NG1).
+
+#### Cleanup Points
+
+| Event | Action |
+|-------|--------|
+| Transfer complete (FILE_FINISH) | Zeroize: `transfer_root_key`, `chain_key`, all derived `message_key`s. Retain: `session_root_key`, `ratchet_keypair`. |
+| Transfer cancel (CANCEL) | Zeroize: all transfer-scoped state immediately. Retain: session state. |
+| Disconnect | Zeroize: ALL BTR state (`session_root_key`, `ratchet_keypair`, any in-flight transfer state). |
+| Reconnect | Fresh ephemeral handshake → fresh `session_root_key`. No state carryover. |
+| DH ratchet step | Zeroize: old `ratchet_secret_key`, old `session_root_key`. Retain: new values. |
+| Chain advance | Zeroize: old `chain_key` immediately after deriving `next_chain_key` + `message_key`. |
+
+#### Prohibited Operations
+
+- Persisting BTR state to disk (violates SEC-04).
+- Reusing `message_key` for multiple chunks (violates single-use property).
+- Carrying BTR state across sessions (violates SEC-05, memory-only policy).
+- Skipping chain indices (violates ORDER-BTR — no gap tolerance).
+
+### 16.6 BTR Security Invariants
+
+| ID | Invariant | Normative |
+|----|-----------|-----------|
+| BTR-INV-01 | Session root key MUST be derived from ephemeral shared secret via HKDF, not used directly | REQUIRED |
+| BTR-INV-02 | Transfer root key MUST bind to `transfer_id` via HKDF salt | REQUIRED |
+| BTR-INV-03 | Chain key MUST advance per chunk; old chain key zeroized immediately | REQUIRED |
+| BTR-INV-04 | Message key MUST be single-use; zeroized after encrypt or decrypt | REQUIRED |
+| BTR-INV-05 | DH ratchet step MUST use a fresh X25519 keypair per transfer boundary | REQUIRED |
+| BTR-INV-06 | Ratchet generation MUST be monotonically increasing per session | REQUIRED |
+| BTR-INV-07 | Chain index gap MUST be rejected (no skipped-key buffer) | REQUIRED |
+| BTR-INV-08 | All BTR key material MUST be memory-only (no disk persistence) | REQUIRED |
+| BTR-INV-09 | All BTR state MUST be zeroized on disconnect | REQUIRED |
+| BTR-INV-10 | BTR MUST NOT alter SAS computation inputs | REQUIRED |
+| BTR-INV-11 | BTR-encrypted envelopes MUST use NaCl secretbox keyed by message_key | REQUIRED |
+
+### 16.7 BTR Error Behavior
+
+| Error Code | Trigger | Required Action |
+|------------|---------|-----------------|
+| `RATCHET_STATE_ERROR` | Ratchet generation mismatch, unexpected DH key, missing required BTR fields | Send error inside envelope, disconnect immediately |
+| `RATCHET_CHAIN_ERROR` | `chain_index` != expected next, chain index gap | Send error inside envelope, cancel transfer |
+| `RATCHET_DECRYPT_FAIL` | NaCl secretbox open fails with BTR message key | Send error inside envelope, cancel transfer |
+| `RATCHET_DOWNGRADE_REJECTED` | Peer advertised BTR but sends non-BTR or invalid BTR envelopes | Send error inside envelope, disconnect immediately |
+
+All BTR errors are sent inside encrypted envelopes (post-handshake). The
+`transfer_id` field SHOULD be included when the error relates to a specific transfer.
+
+### 16.8 BTR-1 Entry Criteria
+
+BTR-0 (this spec lock) gates all subsequent implementation phases. BTR-1
+(Rust reference implementation) may begin when ALL of the following are satisfied:
+
+1. This section (§16) is tagged and published in `bolt-protocol`.
+2. §4 capability negotiation matrix is locked (6 cells defined).
+3. §10 error registry includes all 4 BTR error codes.
+4. §11 BTR security invariants are locked (BTR-INV-01 through BTR-INV-11).
+5. §16.3 key schedule (HKDF info strings, derivation chain) is locked.
+6. §16.5 lifecycle cleanup points are locked.
+7. Ecosystem governance docs mark BTR-0 as DONE and BTR-1 as UNBLOCKED.
+
+---
+
 ## Appendix A: Profile System
 
 - Bolt Core is transport-agnostic
@@ -839,11 +1227,26 @@ subsequent message may alter the negotiated capability set.
 - Known profiles: LocalBolt Profile v1, ByteBolt Profile (future)
 - A ByteBolt implementation SHOULD support the LocalBolt Profile for LAN interoperability
 
-## Appendix B: Key Rotation (out of scope for v1)
+## Appendix B: Key Rotation
 
-Key rotation is not defined in Bolt Core v1. Implementations re-key by unpairing and re-pairing, replacing pinned keys. v2 will define explicit `KEY_ROTATE` messages with SAS confirmation.
+**Identity key rotation** is not defined in Bolt Core v1. Implementations re-key
+identity by unpairing and re-pairing, replacing pinned keys. v2 will define
+explicit `KEY_ROTATE` messages with SAS confirmation.
+
+**Session key rotation** is provided by the Bolt Transfer Ratchet (§16) when
+`bolt.transfer-ratchet-v1` is negotiated. BTR rotates encryption keys at two
+granularities:
+
+- **Per-chunk:** Symmetric chain advancement derives a fresh message key per chunk.
+- **Per-transfer:** DH ratchet step at each transfer boundary derives a fresh
+  session root key, providing self-healing forward secrecy.
+
+Without BTR, a single ephemeral shared secret is used for all messages in a
+session (v1 static ephemeral model).
 
 ## Appendix C: Conformance Tests
+
+### Core Conformance (v1)
 
 1. Handshake gating: reject `FILE_OFFER` before HELLO completion -> `ERROR(INVALID_STATE)`
 2. Key mismatch: pinned key differs -> `ERROR(KEY_MISMATCH)` then close
@@ -852,3 +1255,28 @@ Key rotation is not defined in Bolt Core v1. Implementations re-key by unpairing
 5. SAS vectors: raw identity keys + envelope-header ephemeral keys -> expected 6 hex chars
 6. Envelope: protected message outside envelope -> reject
 7. Plaintext leak: `PING`/`PONG` contain no sensitive data
+
+### BTR Conformance (when `bolt.transfer-ratchet-v1` implemented)
+
+Test vector categories required for BTR conformance. Vectors are generated by
+the Rust reference implementation (BTR-1) and consumed by all implementations
+for parity verification.
+
+| Category | Schema | Purpose | Min Vectors |
+|----------|--------|---------|-------------|
+| `btr-key-schedule` | `{ ephemeral_shared_secret, expected_session_root_key }` | Session root derivation via HKDF | 3 |
+| `btr-transfer-ratchet` | `{ session_root_key, transfer_id, expected_transfer_root_key }` | Transfer key derivation bound to transfer_id | 4 |
+| `btr-chain-advance` | `{ chain_key, expected_message_key, expected_next_chain_key }` | Per-chunk symmetric chain KDF | 5 |
+| `btr-replay-reject` | `{ ratchet_generation, chain_index, expected_reject }` | Cross-transfer and within-transfer replay rejection | 4 |
+| `btr-downgrade-negotiate` | `{ local_caps, remote_caps, expected_mode, expected_log }` | All 6 negotiation matrix paths | 6 |
+
+**Conformance pass criteria:**
+
+1. All vector categories MUST pass in both Rust and TypeScript implementations.
+2. Cross-language interop: Rust-encrypted chunks MUST decrypt in TS, and vice versa.
+3. Transfer isolation: independent transfers MUST produce independent key chains
+   (identical session but different transfer_ids → different transfer_root_keys).
+4. Adversarial: both implementations MUST reject malformed BTR messages identically
+   (same error code for same violation condition).
+5. Downgrade: both implementations MUST correctly fall back to v1 static ephemeral
+   when BTR is not negotiated, with no BTR fields present.

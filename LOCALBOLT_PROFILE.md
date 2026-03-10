@@ -130,6 +130,35 @@ Encoding identifier negotiated via HELLO: `json-envelope-v1`
 | `identity_key` (bytes32) | Base64 string |
 | `file_hash` (bytes32) | Hex string (64 hex chars) |
 | `payload` (bytes) | Base64 string |
+| `ratchet_public_key` (bytes32) | Base64 string (when BTR negotiated — see PROTOCOL.md §16.2) |
+
+### BTR Envelope Fields (`json-envelope-v1` Encoding)
+
+When `bolt.transfer-ratchet-v1` is negotiated, the envelope wire format includes
+additional fields per PROTOCOL.md §16.2:
+
+```json
+{
+  "type": "bolt-envelope",
+  "senderEphemeralKey": "<base64, 32 bytes>",
+  "nonce": "<base64, 24 bytes>",
+  "ciphertext": "<base64>",
+  "ratchetPublicKey": "<base64, 32 bytes>",
+  "ratchetGeneration": 1,
+  "chainIndex": 0
+}
+```
+
+Field mapping (Core snake_case → Profile camelCase):
+
+| Core Field | Profile Field | Presence |
+|------------|---------------|----------|
+| `ratchet_public_key` | `ratchetPublicKey` | DH ratchet step only (FILE_OFFER, FILE_ACCEPT) |
+| `ratchet_generation` | `ratchetGeneration` | DH ratchet step only |
+| `chain_index` | `chainIndex` | Every FILE_CHUNK in BTR session |
+
+When BTR is NOT negotiated, these fields MUST NOT be present. Receivers MUST
+ignore unknown fields per PROTOCOL.md §4 (forward compatibility).
 
 ### Example: Decrypted HELLO (with optional limits)
 

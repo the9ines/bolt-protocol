@@ -21,7 +21,7 @@ validates minimum coverage requirements.
 
 ## Scope
 
-- Maps top-level sections only (§1–§14, Appendices for PROTOCOL.md; §1–§14 for LOCALBOLT_PROFILE.md).
+- Maps top-level sections only (§1–§16, Appendices for PROTOCOL.md; §1–§14 for LOCALBOLT_PROFILE.md).
 - Does NOT map every subsection.
 - Status reflects current review state, not exhaustive verification.
 
@@ -40,7 +40,7 @@ validates minimum coverage requirements.
 
 | Spec | Total Rows | Minimum with Evidence (N) |
 |------|-----------|--------------------------|
-| PROTOCOL.md | 23 | 10 |
+| PROTOCOL.md | 27 | 10 |
 | LOCALBOLT_PROFILE.md | 14 | 5 |
 
 A row **meets coverage** when:
@@ -90,8 +90,12 @@ A CI guard validates:
 | §15.4 Post-handshake envelope | No plaintext errors in envelope-required mode (PROTO-HARDEN-06, 07) | TS: `bolt-transport-web/src/services/webrtc/WebRTCService.ts` (envelope mode) | `src/envelope.rs` (build_error_payload) | IMPLEMENTED | `bolt-core-sdk/ts/bolt-transport-web/src/__tests__/proto-harden-regression.test.ts`, `bolt-daemon/tests/h5_downgrade_validation.rs` |
 | §15.5 HELLO state machine | No reentrancy, exactly-once, immutable capabilities (PROTO-HARDEN-08–12) | TS: `bolt-transport-web/src/services/webrtc/WebRTCService.ts` (helloComplete guard) | `src/web_hello.rs` (HelloState) | IMPLEMENTED | `bolt-core-sdk/ts/bolt-transport-web/src/__tests__/proto-harden-regression.test.ts`, `bolt-core-sdk/ts/bolt-transport-web/src/__tests__/sa12-hello-reentrancy.test.ts`, `bolt-daemon/tests/h5_downgrade_validation.rs` |
 | Appendix A | Profile system | N/A (informational) | N/A | NOT APPLICABLE | |
-| Appendix B | Key rotation (out of scope for v1) | N/A | N/A | NOT APPLICABLE | |
-| Appendix C | Conformance tests | S1 harness (`rust/bolt-core/tests/conformance/`), H2 tests, H3 vectors | H3 golden vectors, H5 downgrade tests | PARTIAL | `bolt-core-sdk/rust/bolt-core/tests/conformance/main.rs`, `bolt-daemon/tests/h5_downgrade_validation.rs` |
+| §16 BTR Specification | Bolt Transfer Ratchet: key schedule, envelope fields, lifecycle, invariants (BTR-0 spec lock) | N/A (spec only — implementation in BTR-1) | N/A (spec only) | TODO | |
+| §16.3 BTR Key Schedule | HKDF derivation chain: session root, transfer root, chain advance, message key | N/A (BTR-1) | N/A (BTR-1) | TODO | |
+| §16.5 BTR Key Lifecycle | Memory-only policy, cleanup points, zeroization | N/A (BTR-1) | N/A (BTR-1) | TODO | |
+| §16.6 BTR Invariants | BTR-INV-01 through BTR-INV-11 | N/A (BTR-1) | N/A (BTR-1) | TODO | |
+| Appendix B | Key rotation: identity (out of scope for v1), session (via BTR §16) | N/A | N/A | NOT APPLICABLE | |
+| Appendix C | Conformance tests (core + BTR vector categories) | S1 harness (`rust/bolt-core/tests/conformance/`), H2 tests, H3 vectors | H3 golden vectors, H5 downgrade tests | PARTIAL | `bolt-core-sdk/rust/bolt-core/tests/conformance/main.rs`, `bolt-daemon/tests/h5_downgrade_validation.rs` |
 
 ---
 
