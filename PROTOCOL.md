@@ -1220,6 +1220,168 @@ BTR-0 (this spec lock) gates all subsequent implementation phases. BTR-1
 
 ---
 
+## 17. BTR Security Claims
+
+> **Scope:** These claims apply ONLY when both peers have negotiated
+> `bolt.transfer-ratchet-v1` via §4 capability intersection. Without BTR,
+> only the static ephemeral properties of §11 apply.
+>
+> **Authority:** Normative. Claims are bound to invariants in §16.6
+> (BTR-INV-01 through BTR-INV-11) and validated by conformance vectors
+> in Appendix C.
+
+### 17.1 Threat Model
+
+#### Assumed Attacker Capabilities
+
+BTR is designed to resist an active network-level attacker who can:
+
+- **Intercept** all messages between peers (full passive eavesdropping).
+- **Inject** arbitrary messages into the transport channel.
+- **Replay** previously observed messages in any order or quantity.
+- **Reorder** or **delay** messages arbitrarily.
+- **Truncate** or **drop** messages selectively.
+- **Compromise infrastructure** (rendezvous server, relay) — these are
+  explicitly untrusted (§12).
+
+#### Assumptions (Required for Claims to Hold)
+
+| Assumption | Rationale |
+|------------|-----------|
+| Endpoints are not compromised during an active session | BTR protects wire traffic, not local memory. A compromised endpoint can read plaintext directly. |
+| X25519 is computationally secure (CDH assumption) | DH ratchet steps and ephemeral handshake depend on the hardness of the elliptic-curve Diffie-Hellman problem over Curve25519. |
+| HKDF-SHA256 is a secure PRF in the extract-then-expand model | All key derivation (session root, transfer root, chain advancement) uses HKDF-SHA256 (§16.3). |
+| XSalsa20-Poly1305 (NaCl box / secretbox) provides IND-CCA2 security | Envelope encryption (§6.1) and BTR chunk encryption (§16.4) rely on this construction. |
+| CSPRNG produces uniformly random output | Nonces (§6.1), ephemeral keypairs (§3, §16.3), and transfer IDs depend on cryptographic randomness. |
+| Transport provides ordered, reliable delivery with message boundaries | BTR's no-gap chain index policy (ORDER-BTR, §11) depends on §1.1 Wire Model guarantees. |
+
+#### Explicit Non-Goals
+
+The following are NOT security goals of BTR:
+
+- **Metadata privacy.** Transfer timing, sizes, peer codes, and connection
+  patterns are observable by network adversaries and infrastructure (§12).
+- **Post-compromise local secrecy.** If an endpoint is compromised, the
+  attacker can read all plaintext in local memory. BTR protects wire traffic
+  only.
+- **Deniability.** BTR does not provide cryptographic deniability for
+  transferred content.
+- **Quantum resistance.** All DH operations use classical Curve25519.
+
+### 17.2 Security Goals (Normative)
+
+| Goal | Claim | Mechanism | Binding Invariant(s) |
+|------|-------|-----------|---------------------|
+| **Confidentiality** | An attacker who observes all wire traffic learns nothing about plaintext chunk content. | Each chunk is encrypted with a unique `message_key` derived via the BTR chain (§16.3). Keys are never reused (BTR-INV-04). | BTR-INV-03, BTR-INV-04, BTR-INV-11 |
+| **Integrity / Authenticity** | Receiver detects any modification, truncation, or injection of chunk data. | Poly1305 MAC on every envelope (§6.1). BTR-encrypted chunks use NaCl secretbox which is authenticated encryption. `chain_index` validation rejects insertions (BTR-INV-07). | BTR-INV-07, BTR-INV-11 |
+| **Per-chunk forward secrecy** | Compromise of `chain_key[n]` does not reveal `message_key[k]` for any `k < n`. | Symmetric chain advancement is one-way: `chain_key[n]` derives `chain_key[n+1]` via HKDF; the reverse is computationally infeasible. Old chain keys are zeroized immediately (§16.5). | BTR-INV-03 |
+| **Per-transfer forward secrecy (self-healing)** | Compromise of all key material for transfer T does not reveal keys for transfer T+1 or later. | A fresh X25519 DH ratchet step at each transfer boundary (§16.3) introduces new entropy that an attacker without the private key cannot derive. | BTR-INV-05, BTR-INV-09 |
+| **Transfer isolation** | Compromise of transfer A's keys does not enable decryption of transfer B's chunks. | Each transfer derives an independent `transfer_root_key` via HKDF bound to a unique `transfer_id` (§16.3). No derivation path connects distinct transfer key trees. | BTR-INV-02 |
+| **Replay resistance** | Replayed envelopes from prior generations or duplicate chain indices are rejected. | Tuple `(transfer_id, ratchet_generation, chain_index)` is validated. `ratchet_generation` is monotonically increasing (BTR-INV-06). Duplicate `chain_index` is rejected (BTR-INV-07). | BTR-INV-06, BTR-INV-07 |
+| **Downgrade safety** | A peer cannot be silently downgraded from BTR to static ephemeral mode. | Capability negotiation (§4) is performed inside encrypted HELLO envelopes. Mismatch between advertised and observed behavior triggers `RATCHET_DOWNGRADE_REJECTED` (§16.7). | BTR-INV-10 |
+| **Key separation** | Session keys, transfer keys, chain keys, and message keys occupy distinct cryptographic domains. | Each derivation step uses a unique HKDF `info` string (§16.3): `bolt-btr-session-root-v1`, `bolt-btr-transfer-root-v1`, `bolt-btr-message-key-v1`, `bolt-btr-chain-advance-v1`. | BTR-INV-01, BTR-INV-02 |
+| **Zeroization** | Sensitive key material is not retained beyond its useful lifetime. | Memory-only policy (§16.5): no BTR key material is persisted to disk. Chain keys, message keys, and ephemeral private keys are zeroized at defined cleanup points. | BTR-INV-03, BTR-INV-04, BTR-INV-08, BTR-INV-09 |
+
+### 17.3 Out-of-Scope / Not Guaranteed
+
+The following are explicitly NOT guaranteed by BTR. Implementations and users
+MUST NOT rely on BTR for these properties:
+
+1. **Traffic analysis resistance.** BTR does not pad, delay, or otherwise
+   obscure traffic patterns. An observer can infer transfer activity, file
+   sizes, and timing.
+
+2. **Anonymous transfer.** Peer codes and identity keys are exchanged during
+   signaling and handshake. BTR does not provide sender or receiver anonymity.
+
+3. **Protection against compromised endpoints.** If either peer's device is
+   under attacker control, all plaintext is accessible locally. BTR's
+   guarantees are wire-only.
+
+4. **Resistance to malicious peer behavior.** BTR assumes both peers are
+   honest-but-curious at worst. A malicious peer who has completed the
+   handshake can always read the plaintext they receive.
+
+5. **Post-quantum security.** All DH operations (ephemeral handshake and
+   inter-transfer ratchet) use Curve25519. A quantum adversary with a
+   sufficiently powerful quantum computer could break these.
+
+6. **Session resumption.** BTR v1 does not support session resume. Each
+   new connection requires a full ephemeral handshake. Prior BTR state MUST
+   NOT carry over (BTR-NG1, §16.5).
+
+7. **Partial delivery guarantees.** BTR does not provide reliable delivery.
+   If the transport drops a chunk, the receiver will reject subsequent chunks
+   due to chain index gap (ORDER-BTR). Recovery requires retransmission at
+   the transport layer or transfer restart.
+
+### 17.4 Primitive and Construction Rationale
+
+| Primitive | Usage in BTR | Rationale |
+|-----------|-------------|-----------|
+| **X25519** | Ephemeral handshake DH (§3); inter-transfer DH ratchet step (§16.3) | Widely deployed, well-analyzed, constant-time implementations available. Provides 128-bit security level. Compatible with existing Bolt v1 handshake. |
+| **HKDF-SHA256** | Session root derivation, transfer root derivation, symmetric chain advancement (§16.3) | Standard extract-then-expand KDF (RFC 5869). Domain separation via distinct `info` strings prevents cross-purpose key confusion. SHA-256 provides collision resistance sufficient for 128-bit security. |
+| **NaCl secretbox (XSalsa20-Poly1305)** | BTR chunk encryption (§16.4) | Same AEAD construction used by Bolt v1 envelope encryption (§6.1). Avoids introducing a second cipher suite. Nonce misuse is prevented by single-use message keys (BTR-INV-04). |
+| **No skipped-key buffer** | Chain index gap rejection (ORDER-BTR) | Bolt's wire model (§1.1) guarantees ordered delivery. A skipped-key buffer would add implementation complexity, expand the attack surface (state accumulation), and serve no purpose given the transport guarantee. |
+| **Per-transfer DH ratchet (not per-chunk)** | Inter-transfer ratchet step (§16.3) | Per-chunk DH would add one X25519 scalar multiplication per chunk — prohibitive for large file transfers. Per-transfer DH provides self-healing forward secrecy at transfer boundaries while keeping per-chunk overhead to symmetric-only operations. |
+
+### 17.5 Conformance and Evidence Requirements
+
+#### Claim-to-Evidence Mapping
+
+| Claim | Invariants | Conformance Vectors (Appendix C) | Cross-Language Suite |
+|-------|-----------|----------------------------------|---------------------|
+| Confidentiality | BTR-INV-03, 04, 11 | `btr-key-schedule`, `btr-chain-advance` | Rust↔TS interop: Rust-encrypted chunks MUST decrypt in TS and vice versa |
+| Integrity | BTR-INV-07, 11 | `btr-replay-reject` | Both implementations MUST reject malformed BTR messages identically |
+| Per-chunk FS | BTR-INV-03 | `btr-chain-advance` | Chain advancement outputs MUST match across implementations |
+| Per-transfer FS | BTR-INV-05, 09 | `btr-transfer-ratchet` | Independent transfers MUST produce independent key chains |
+| Transfer isolation | BTR-INV-02 | `btr-transfer-ratchet` | Same session, different transfer_ids → different transfer_root_keys |
+| Replay resistance | BTR-INV-06, 07 | `btr-replay-reject` | Cross-transfer and within-transfer replay rejection verified |
+| Downgrade safety | BTR-INV-10 | `btr-downgrade-negotiate` | All 6 negotiation matrix paths verified |
+| Key separation | BTR-INV-01, 02 | `btr-key-schedule`, `btr-transfer-ratchet` | Derivation with distinct info strings produces distinct outputs |
+| Zeroization | BTR-INV-03, 04, 08, 09 | — (runtime property, not vector-testable) | Implementation review required |
+
+#### Evidence Requirements for Future Changes
+
+Any change to the BTR key schedule, primitives, or security claims MUST
+provide:
+
+1. Updated conformance vectors demonstrating the new behavior.
+2. Cross-language test results (Rust and TypeScript at minimum).
+3. At least one adversarial test case per affected claim.
+4. Updated invariant table (§16.6) if invariant semantics change.
+
+### 17.6 Change-Control Security Policy
+
+1. **No claim expansion without evidence.** A new security claim MUST NOT be
+   added to §17.2 unless accompanied by:
+   - A binding invariant in §16.6.
+   - At least one conformance vector in Appendix C.
+   - Cross-language test coverage.
+
+2. **Claim-impacting changes.** Any protocol change that weakens, strengthens,
+   or alters a claim in §17.2 MUST:
+   - Update the normative spec text in §16 and §17.
+   - Update or add conformance vectors in Appendix C.
+   - Include a compatibility statement (does the change break interop with
+     prior versions?).
+   - Include a security impact note (which claims are affected and how?).
+
+3. **Primitive substitution.** Replacing a primitive listed in §17.4 (e.g.,
+   X25519 → X448, SHA-256 → SHA-3) requires:
+   - Updated HKDF info strings to prevent cross-version key confusion.
+   - New conformance vectors for the replacement primitive.
+   - Capability version increment (`bolt.transfer-ratchet-v2` or higher).
+   - Security analysis demonstrating the replacement meets or exceeds the
+     original security level.
+
+4. **Deprecation.** Removing a security claim MUST be documented with:
+   - Rationale for removal.
+   - Migration guidance for implementations relying on the claim.
+   - Transition period specified in the capability negotiation matrix.
+
+---
+
 ## Appendix A: Profile System
 
 - Bolt Core is transport-agnostic
