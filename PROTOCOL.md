@@ -1,12 +1,40 @@
 > **Canonical Location:** `bolt-protocol/PROTOCOL.md`
-> This file is the single authoritative specification.
+> Authoritative for wire-level protocol semantics: identity, session
+> security, message formats, state machines, conformance rules, and
+> cryptographic requirements.
 > SDKs and daemons implement this specification.
+>
+> Product-level session/transfer lifecycle and ecosystem interoperability
+> are defined in `bolt-core-sdk/docs/SESSION_CONTRACT.md`. The two
+> documents are complementary layers, not competing authorities.
 
 # Bolt Protocol Core v1
 
 **Version:** 1.0.0
-**Status:** Draft
+**Status:** Frozen
 **Date:** 2026-02-19
+**Frozen:** 2026-04-07
+
+### Stability
+
+This specification is **frozen at v1.0.0**. All normative sections (§1–§17)
+are stable. Implementations MAY rely on the stability of:
+
+- Wire message formats and envelope schema (§6)
+- State machines (§9)
+- Error code registry (§10)
+- Conformance requirements (§13)
+- Constants (§14)
+- Handshake invariants (§15, PROTO-HARDEN-01 through PROTO-HARDEN-12)
+- BTR specification and invariants (§16–§17, BTR-INV-01 through BTR-INV-11)
+
+**Compatibility commitment:** No breaking changes without a major version
+bump (v2.0.0). Additive extensions (new capabilities, new optional fields)
+are permitted via the existing capability negotiation mechanism (§4) and
+do not require a version bump. New error codes require a spec amendment.
+
+**v2 notes** scattered throughout this document are informational only and
+do not constitute commitments.
 
 ---
 
@@ -610,6 +638,13 @@ IDLE -> OFFERED -> ACCEPTED -> TRANSFERRING <-> PAUSED -> COMPLETED
                                     |                        |
                                   ERROR <------------- CANCELLED
 ```
+
+### Product-Level State Mapping
+
+Products MAY use a simplified session/transfer phase model for ecosystem
+interoperability. The product-level contract (`bolt-core-sdk/docs/SESSION_CONTRACT.md`)
+defines 5 session phases and 5 transfer phases that map onto the wire-level
+states above. See `SESSION_CONTRACT.md` § Layer Relationship for the mapping.
 
 ---
 

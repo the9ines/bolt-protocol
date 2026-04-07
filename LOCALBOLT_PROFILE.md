@@ -1,13 +1,35 @@
 > **Canonical Location:** `bolt-protocol/LOCALBOLT_PROFILE.md`
-> This file is the single authoritative specification.
-> SDKs and daemons implement this specification.
+> Authoritative for LocalBolt profile-level bindings: transport selection,
+> encoding, wire format, discovery policy, and resource limits.
+> Subordinate to `PROTOCOL.md` (wire-level) and `SESSION_CONTRACT.md`
+> (ecosystem interoperability). SDKs and daemons implement this profile.
 
 # LocalBolt Profile v1
 
 **Version:** 1.0.0
-**Status:** Draft
+**Status:** Frozen
 **Date:** 2026-02-19
+**Frozen:** 2026-04-07
 **Implements:** Bolt Core v1
+
+### Stability
+
+This profile specification is **frozen at v1.0.0**. All normative sections
+are stable. Implementations MAY rely on the stability of:
+
+- Rendezvous wire format (§3)
+- Peer channel requirements (§4)
+- Message encoding `json-envelope-v1` (§6)
+- Resource limits (§8)
+- Key exchange binding (§10)
+- Replay protection (§12)
+- File integrity verification (§13)
+- Profile Envelope v1 (§14)
+
+**Compatibility commitment:** No breaking changes without a major version
+bump. Additive extensions (new capabilities, new optional envelope fields)
+are permitted and do not require a version bump. Receivers MUST ignore
+unknown fields per PROTOCOL.md §4.
 
 ---
 
